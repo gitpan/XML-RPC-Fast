@@ -7,12 +7,57 @@ use XML::Hash::LX 0.05;
 use Test::More;
 use Test::NoWarnings;
 use Encode;
-
+use Data::Dumper;$Data::Dumper::Useqq=1;
+BEGIN{
+	binmode Test::More->builder->$_, ':utf8'
+		for qw(failure_output todo_output output);
+}
+sub dd(@) { Dumper (@_) }
 # Encoder
 
-plan tests => 22;
+plan tests => 36;
 
-my $enc = XML::RPC::Enc::LibXML->new();
+my $enc = XML::RPC::Enc::LibXML->new(
+	internal_encoding => 'utf8',
+);
+
+my $hd = qq{<?xml version="1.0" encoding="utf-8"?>\n};
+my ($xml,$data);
+
+#$xml = q{<?xml version="1.0" encoding="utf-8"?><methodCall><methodName>bss.storeDataStorage</methodName><params><param><value><struct><member><name>value</name><value><string>€€€</string></value></member><member><name>name</name><value><string>test</string></value></member></struct></value></param></params></methodCall>};
+#print + Dumper $enc->decode( $xml );exit;
+#print my $xml = $enc->request( test => bless( \do {my $o}, 'custom' ) );#exit;
+#use Data::Dumper; print + Dumper $enc->decode( $xml );
+#exit;
+
+$SIG{__DIE__} = sub { require Carp;Carp::confess @_ };
+
+is
+	$xml = $enc->request( test => () ),
+	$hd."<methodCall><methodName>test</methodName><params/></methodCall>\n",
+	'undef args',
+	or diag dd ($xml)
+;
+is_deeply
+	$data = [ $enc->decode($xml) ],
+	[ test => () ],
+	'decode empty',
+	or diag dd $data
+;
+
+is
+	$xml = $enc->request( test => bless( \do {my $o}, 'custom' ) ),
+	$hd."<methodCall><methodName>test</methodName><params><param><value><custom/></value></param></params></methodCall>\n",
+	'custom undef args',
+	or diag dd ($xml)
+;
+is_deeply
+	$data = [ $enc->decode($xml) ],
+	[ test => bless( \do {my $o}, 'custom' ) ],
+	'decode empty custom',
+	or diag dd $data
+;
+
 is_deeply xml2hash( $enc->request( test => 1 ) ),
 	{ methodCall => { methodName => "test", params => { param => { value => { i4 => 1 } } } } },
 	'request i4';
@@ -23,11 +68,17 @@ is_deeply xml2hash( $enc->request( test => 'z' ) ),
 	{ methodCall => { methodName => "test", params => { param => { value => { string => 'z' } } } } },
 	'request string';
 
-is_deeply xml2hash( $enc->request( test => { a => 1 } ) ),
+is_deeply xml2hash( $xml = $enc->request( test => { a => 1 } ) ),
 	{ methodCall => { methodName => "test", params => { param => { value => {
 		struct => { member => { name => 'a', value => { i4 => 1 } } }
 	} } } } },
 	'request struct';
+
+is $xml,
+	$hd."<methodCall><methodName>test</methodName><params><param><value><struct><member><name>a</name><value><i4>1</i4></value></member></struct></value></param></params></methodCall>\n",
+	'request xml struct'
+	or diag dd $xml
+;
 
 is_deeply xml2hash( $enc->request( test => [ 1,2 ] ) ),
 	{ methodCall => { methodName => "test", params => { param => { value => {
@@ -72,9 +123,18 @@ is_deeply xml2hash( $enc->fault( 555,'test' ) ),
 
 {
 	local $enc->{external_encoding} = 'windows-1251';
+	local $enc->{internal_encoding} = undef;
 	is $enc->response( Encode::decode utf8 => "тест" ),
 	Encode::encode( $enc->{external_encoding} => Encode::decode utf8 => qq{<?xml version="1.0" encoding="windows-1251"?>\n<methodResponse><params><param><value><string>тест</string></value></param></params></methodResponse>\n} ),
 	'external_encoding';
+}
+
+{
+	use bytes;
+	local $enc->{internal_encoding} = undef;
+	is $enc->response( Encode::decode utf8 => "тест" ),
+	qq{<?xml version="1.0" encoding="utf-8"?>\n<methodResponse><params><param><value><string>тест</string></value></param></params></methodResponse>\n},
+	'utf8-ness';
 }
 
 # Decoder
@@ -99,9 +159,17 @@ is_deeply [ $enc->decode( ( $enc->request( test => bless( do{\(my $o = '12345')}
 	[ test => bless(do{\(my $o = '12345')}, 'custom') ],
 	'decode custom bless';
 
-is_deeply [ $enc->decode( ( $enc->request( test => bless( do{\(my $o = {a => 1})}, 'custom' ) ) ) ) ],
+is_deeply $data = [ $enc->decode( ( $xml = $enc->request( test => bless( do{\(my $o = {a => 1})}, 'custom' ) ) ) ) ],
 	[ test => bless(do{\(my $o = {a => 1})}, 'custom') ],
-	'decode custom bless struct';
+	'decode custom bless struct',
+	or diag Dumper($xml,$data)
+;
+
+is_deeply $data = [ $enc->decode( ( $xml = $enc->request( test => { a => 1 } ) ) ) ],
+	[ test => { a => 1 } ],
+	'decode struct',
+	or diag Dumper($xml,$data)
+;
 
 SKIP : {
 	eval { require MIME::Base64;1 } or skip 'MIME::Base64 required',1;
@@ -117,7 +185,66 @@ SKIP : {
 		'decode datetime';
 }
 
+# Tests for Marko Nordberg's testcases
+
+{
+	is_deeply $data = [ $enc->decode( q{<?xml version="1.0" encoding="UTF-8"?><methodResponse xmlns:ex="http://ws.apache.org/xmlrpc/namespaces/extensions"><params><param><value><struct><member><name>status</name><value>noError</value></member></struct></value></param></params></methodResponse>} ) ],
+		[ { status => 'noError' } ],
+		'decode 1',
+		or diag Dumper($data)
+	;
+}
+{
+	local $enc->{internal_encoding} = undef;
+	is_deeply $data = [ $enc->decode( q{<?xml version="1.0" encoding="utf-8"?><methodCall><methodName>bss.storeDataStorage</methodName><params><param><value><struct><member><name>value</name><value><string>€€€</string></value></member><member><name>name</name><value><string>test</string></value></member></struct></value></param></params></methodCall>} ) ],
+		[ 'bss.storeDataStorage' => { name => 'test', value => "\x{20ac}\x{20ac}\x{20ac}", } ],
+		'decode 2',
+		or diag Dumper($data)
+	;
+}
+
+{
+	local $enc->{internal_encoding} = undef;
+	is $data = length($xml = $enc->request( 'bss.storeDataStorage' => { name => 'test', value => "\x{20ac}\x{20ac}\x{20ac}", } )),
+		320,
+		'utf8 xml content length'
+		or diag dd $data, $xml;
+}
+
+is $data = length($xml = $enc->request( 'bss.storeDataStorage' => { name => 'test', value => "€€€", } )),
+	320,
+	'inplace octets xml content length'
+	or diag dd $data, $xml;
+
+is $data = length($xml = $enc->request( 'bss.storeDataStorage' => { name => 'test', value => "\342\202\254\342\202\254\342\202\254", } )),
+	320,
+	'octets xml content length'
+	or diag dd $data, $xml;
+
+{
+	local $enc->{internal_encoding} = undef;
+	is_deeply $data = [ $enc->decode( q{<?xml version="1.0" encoding="utf-8"?><methodCall><methodName>storeDataStorage</methodName><params><param><value><struct><member><name>value</name><value><string>ÄÄÄ</string></value></member><member><name>name</name><value><string>test</string></value></member></struct></value></param></params></methodCall>} ) ],
+		[ storeDataStorage => { name => 'test', value => "\x{c4}\x{c4}\x{c4}", }],
+		'decode 3',
+		or diag Dumper($data)
+	;
+}
+
+{
+	#local $enc->{internal_encoding} = undef;
+	is_deeply $data = [ $enc->decode( qq{$hd<methodResponse><params><param><value><array/></value></param></params></methodResponse>} ) ],
+		[ [] ],
+		'decode 4',
+		or diag Dumper($data)
+	;
+}
+
 __END__
+is_deeply $data = [ $enc->decode( q{} ) ],
+	[ ],
+	'decode 3',
+	or diag Dumper($data)
+;
 my $hash = [
 	{
 		name => 'rec',
