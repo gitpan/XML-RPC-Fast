@@ -1,18 +1,9 @@
-# XML::RPC::Fast
-#
-# Copyright (c) 2008-2009 Mons Anderson <mons@cpan.org>, all rights reserved
-# This program is free software; you can redistribute it and/or
-# modify it under the same terms as Perl itself.
-
-package XML::RPC::Fast;
-
 =head1 NAME
 
 XML::RPC::Fast - Fast and modular implementation for an XML-RPC client and server
 
-=cut
 
-our $VERSION   = '0.7'; $VERSION = eval $VERSION;
+=cut
 
 =head1 SYNOPSIS
 
@@ -231,228 +222,8 @@ When passing SCALARREF as a value, package name will be taken as type and derefe
 
 When passing REFREF as a value, package name will be taken as type and L<XML::Hash::LX>C<::hash2xml(deref)> would be used as value
 
+
 =cut
-
-use 5.008003; # I want Encode to work
-use strict;
-use warnings;
-
-#use Time::HiRes qw(time);
-use Carp qw(carp croak);
-
-BEGIN {
-	eval {
-		require Sub::Name;
-		Sub::Name->import('subname');
-	1 } or do { *subname = sub { $_[1] } };
-
-	no strict 'refs';
-	for my $m (qw(url encoder ua)) {
-		*$m = sub {
-			local *__ANON__ = $m;
-			my $self = shift;
-			$self->{$m} = shift if @_;
-			$self->{$m};
-		};
-	}
-}
-
-our $faultCode = 0;
-
-#sub encoder { shift->{encoder} }
-#sub ua      { shift->{ua} }
-
-sub import {
-	my $me = shift;
-	my $pkg = caller;
-	no strict 'refs';
-	@_ or return;
-	for (@_) {
-		if ( $_ eq 'rpcfault') {
-			*{$pkg.'::'.$_} = \&$_;
-		} else {
-			croak "$_ is not exported by $me";
-		}
-	}
-}
-
-sub rpcfault {
-	my ($code,$string) = @_;
-	return {
-		fault => {
-			faultCode   => $code,
-			faultString => $string,
-		},
-	}
-}
-
-sub _load {
-	my $pkg = shift;
-	my ($prefix,$req,$default,@args) = @_;
-	if (defined $req) {
-		my @fail;
-		eval {
-			require join '/', split '::', $prefix.$req.'.pm';
-			$req = $prefix.$req;
-			1;
-		}
-		or do {
-			push @fail, [ $prefix.$req,$@ ];
-			eval{ require join '/', split '::', $req.'.pm'; 1 }
-		}
-		or do {
-			push @fail, [ $req,$@ ];
-			croak "Can't load any of:\n".join("\n\t",map { "$$_[0]: $$_[1]" } @fail)."\n";
-		}
-	} else {
-		eval {
-			$req = $prefix.$default;
-			require join '/', split '::', $req.'.pm'; 1
-		}
-		or do {
-			croak "Can't load $req: $@\n";
-		}
-	}
-	return $req->new(@args);
-}
-
-sub new {
-	my $package = shift;
-	my $url  = shift;
-	local $SIG{__WARN__} = sub { local $_ = shift; s{\n$}{};carp $_ };
-	my $self = {
-		@_,
-	};
-	unless ( ref $self->{encoder} ) {
-		$self->{encoder} = $package->_load(
-			'XML::RPC::Enc::', $self->{encoder}, 'LibXML',
-			internal_encoding => $self->{internal_encoding},
-			external_encoding => $self->{external_encoding},
-		);
-	}
-	if ( $url and !ref $self->{ua} ) {
-		$self->{ua} = $package->_load(
-			'XML::RPC::UA::', $self->{ua}, 'LWP',
-			ua      => $self->{useragent} || 'XML-RPC-Fast/'.$VERSION,
-			timeout => $self->{timeout},
-		);
-	}
-	$self->{url} = $url;
-	bless $self, $package;
-	return $self;
-}
-
-sub registerType {
-	shift->encoder->registerType(@_);
-}
-
-sub registerClass {
-	shift->encoder->registerClass(@_);
-}
-
-sub call {
-	my $self = shift;
-	my $cb;$cb = shift if ref $_[0] and ref $_[0] eq 'CODE';
-	$self->req(
-		call => [@_],
-		$cb ? ( cb => $cb ) : (),
-	);
-}
-
-sub req {
-	my $self = shift;
-	my %args = @_;
-	my $cb = $args{cb};
-	if ($self->ua->async and !$cb) {
-		croak("Call have no cb and useragent is async");
-	}
-	my ( $methodname, @params ) = @{ $args{call} };
-	my $url = $args{url} || $self->{url};
-
-	unless ( $url ) {
-		if ($cb) {
-			$cb->(rpcfault(500, "No url"));
-			return;
-		} else {
-			croak('No url');
-		}
-	};
-	my $uri = "$url#$methodname";
-
-	$faultCode = 0;
-	my $body;
-	{
-		local $self->encoder->{external_encoding} = $args{external_encoding} if exists $args{external_encoding};
-		my $newurl;
-		($body,$newurl) = $self->encoder->request( $methodname, @params );
-		$url = $newurl if defined $newurl;
-	}
-
-	$self->{xml_out} = $body;
-
-	#my $start = time;
-	my @data;
-	#warn "Call $body";
-	$self->ua->call(
-		($args{method} || 'POST')    => $url,
-		$args{headers} ? ( headers => $args{headers} ) : (),
-		body    => $body,
-		cb      => sub {
-			my $res = shift;
-			{
-				( my $status = $res->status_line )=~ s/:?\s*$//s;
-				$res->code == 200 or @data = 
-					(rpcfault( $res->code, "Call to $uri failed: $status" ))
-					and last;
-				my $text = $res->content;
-				length($text) and $text =~ /^\s*<\?xml/s or @data = 
-					({fault=>{ faultCode => 499,        faultString => "Call to $uri failed: Response is not an XML: \"$text\"" }})
-					and last;
-				eval {
-					@data = $self->encoder->decode( $text );
-					1;
-				} or @data = 
-					({fault=>{ faultCode => 499,     faultString => "Call to $uri failed: Bad Response: $@, \"$text\"" }})
-					and last;
-			}
-			#warn "Have data @data";
-			if ($cb) {{
-				local $faultCode = $data[0]{fault}{faultCode} if ref $data[0] eq 'HASH' and exists $data[0]{fault};
-				$cb->(@data);
-				return;
-			}}
-		},
-	);
-	$cb and defined wantarray and carp "Useless use of return value for ".__PACKAGE__."->call(cb)";
-	return if $cb;
-	if ( ref $data[0] eq 'HASH' and exists $data[0]{fault} ) {
-		$faultCode = $data[0]{fault}{faultCode};
-		croak( "Remote Error [$data[0]{fault}{faultCode}]: ".$data[0]{fault}{faultString} );
-	}
-	return @data == 1 ? $data[0] : @data;
-}
-
-sub receive { # ok
-	my $self   = shift;
-	my $result = eval {
-		my $xml_in = shift or return $self->encoder->fault(400,"Bad Request: No XML");
-		my $handler = shift or return $self->encoder->fault(501,"Server Error: No handler");;
-		my ( $methodname, @params ) = $self->encoder->decode($xml_in);
-		local $self->{xml_in} = $xml_in;
-		subname( 'receive.handler.'.$methodname,$handler );
-		my @res = $handler->( $methodname, @params );
-		if (ref $res[0] eq 'HASH' and exists $res[0]{fault}) {
-			$self->encoder->fault( $res[0]{fault}{faultCode},$res[0]{fault}{faultString} );
-		} else {
-			$self->encoder->response( @res );
-		}
-	};
-	if ($@) {
-		(my $e = "$@") =~ s{\r?\n+$}{}s;
-		$result = $self->encoder->fault(defined $faultCode ? $faultCode : 500,$e);
-	}
-	return $result;
-}
 
 =head1 BUGS & SUPPORT
 
@@ -475,6 +246,6 @@ Copyright (c) 2008-2009 Mons Anderson.
 This program is free software; you can redistribute it and/or modify it
 under the same terms as Perl itself.
 
+
 =cut
 
-1;
